@@ -1,158 +1,209 @@
-import html
-import json
 import os
+import json
 import re
-import sys
-import time
-import urllib.request
-import urllib.parse
+import html
+from pathlib import Path
 
-NAVER_NEWS_API_URL = "https://openapi.naver.com/v1/search/news.json"
+import requests
+
+
+NAVER_API_URL = "https://openapi.naver.com/v1/search/news.json"
+STATE_FILE = Path("state.json")
 QUERY = "이노션"
-DISPLAY = 100
-SORT = "date"
-
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
-
-# Cap on how many links we remember, so state.json doesn't grow forever.
-MAX_SEEN_LINKS = 1000
 
 
-def strip_html(text: str) -> str:
-    """Naver API returns titles/descriptions with <b> tags and HTML entities."""
-    text = re.sub(r"<[^>]+>", "", text or "")
-    return html.unescape(text).strip()
+def clean_text(text: str) -> str:
+    """네이버 뉴스 API 응답에 포함된 HTML 태그를 제거합니다."""
+    text = html.unescape(text or "")
+    text = re.sub(r"<.*?>", "", text)
+    return text.strip()
 
 
-def fetch_news() -> list[dict]:
-    client_id = os.environ.get("NAVER_CLIENT_ID")
-    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
-
-    if not client_id or not client_secret:
-        raise RuntimeError(
-            "NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 환경변수가 설정되어 있지 않습니다."
-        )
-
-    params = urllib.parse.urlencode(
-        {
-            "query": QUERY,
-            "display": DISPLAY,
-            "sort": SORT,
+def load_state() -> dict:
+    """이미 전송한 기사 링크 목록을 불러옵니다."""
+    if not STATE_FILE.exists():
+        return {
+            "initialized": False,
+            "seen_links": []
         }
+
+    with STATE_FILE.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(state: dict) -> None:
+    """이미 전송한 기사 링크 목록을 저장합니다."""
+    with STATE_FILE.open("w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def fetch_naver_news() -> list[dict]:
+    """네이버 뉴스 검색 API에서 최신 뉴스를 가져옵니다."""
+    client_id = os.environ["NAVER_CLIENT_ID"]
+    client_secret = os.environ["NAVER_CLIENT_SECRET"]
+
+    headers = {
+        "X-Naver-Client-Id": client_id,
+        "X-Naver-Client-Secret": client_secret,
+    }
+
+    params = {
+        "query": QUERY,
+        "display": 100,
+        "start": 1,
+        "sort": "date",
+    }
+
+    response = requests.get(
+        NAVER_API_URL,
+        headers=headers,
+        params=params,
+        timeout=15,
     )
-    url = f"{NAVER_NEWS_API_URL}?{params}"
 
-    request = urllib.request.Request(url)
-    request.add_header("X-Naver-Client-Id", client_id)
-    request.add_header("X-Naver-Client-Secret", client_secret)
+    if response.status_code >= 400:
+        print("Naver API failed")
+        print("Status code:", response.status_code)
+        print("Response body:", response.text[:1000])
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8"))
-
-    return body.get("items", [])
+    response.raise_for_status()
+    return response.json().get("items", [])
 
 
-def load_state() -> tuple[dict, bool]:
-    """Returns (state, is_first_run)."""
-    if not os.path.exists(STATE_FILE):
-        return {"seen_links": []}, True
+def normalize_article(item: dict) -> dict:
+    """네이버 뉴스 API 응답을 사용하기 쉬운 형태로 정리합니다."""
+    title = clean_text(item.get("title"))
+    description = clean_text(item.get("description"))
+    link = item.get("originallink") or item.get("link")
+    naver_link = item.get("link")
+    pub_date = item.get("pubDate")
 
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        try:
-            state = json.load(f)
-        except json.JSONDecodeError:
-            state = {}
-
-    if "seen_links" not in state:
-        state["seen_links"] = []
-
-    return state, False
-
-
-def save_state(seen_links: list[str]) -> None:
-    # Keep only the most recently seen links to bound file size.
-    trimmed = seen_links[-MAX_SEEN_LINKS:]
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"seen_links": trimmed}, f, ensure_ascii=False, indent=2)
+    return {
+        "title": title,
+        "description": description,
+        "link": link,
+        "naver_link": naver_link,
+        "pubDate": pub_date,
+    }
 
 
 def send_teams_message(article: dict) -> None:
-    webhook_url = os.environ.get("TEAMS_WEBHOOK_URL")
-    if not webhook_url:
-        raise RuntimeError("TEAMS_WEBHOOK_URL 환경변수가 설정되어 있지 않습니다.")
+    """신규 기사를 Microsoft Teams 채널로 전송합니다."""
+    webhook_url = os.environ["TEAMS_WEBHOOK_URL"]
 
-    title = strip_html(article.get("title", ""))
-    summary = strip_html(article.get("description", ""))
+    title = article.get("title", "")
+    description = article.get("description", "")
     pub_date = article.get("pubDate", "")
-    link = article.get("originallink") or article.get("link", "")
+    link = article.get("link") or article.get("naver_link") or ""
 
-    payload = {
-        "@type": "MessageCard",
-        "@context": "http://schema.org/extensions",
-        "summary": title,
-        "themeColor": "0076D7",
-        "title": title,
-        "sections": [
+    adaptive_card = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.2",
+        "body": [
             {
+                "type": "TextBlock",
+                "text": "📰 [이노션] 신규 뉴스",
+                "weight": "Bolder",
+                "size": "Medium",
+                "wrap": True
+            },
+            {
+                "type": "TextBlock",
+                "text": title,
+                "weight": "Bolder",
+                "wrap": True
+            },
+            {
+                "type": "TextBlock",
+                "text": description,
+                "wrap": True
+            },
+            {
+                "type": "FactSet",
                 "facts": [
-                    {"name": "요약", "value": summary or "(요약 없음)"},
-                    {"name": "발행일", "value": pub_date or "(알 수 없음)"},
-                    {"name": "링크", "value": link},
-                ],
-                "markdown": True,
+                    {
+                        "title": "발행일",
+                        "value": pub_date or "-"
+                    }
+                ]
             }
-        ],
-        "potentialAction": [
-            {
-                "@type": "OpenUri",
-                "name": "기사 보기",
-                "targets": [{"os": "default", "uri": link}],
-            }
-        ],
+        ]
     }
 
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        webhook_url, data=data, headers={"Content-Type": "application/json"}
+    if link.startswith("http"):
+        adaptive_card["actions"] = [
+            {
+                "type": "Action.OpenUrl",
+                "title": "기사 보기",
+                "url": link
+            }
+        ]
+
+    payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": adaptive_card
+            }
+        ]
+    }
+
+    response = requests.post(
+        webhook_url,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=15,
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        response.read()
+
+    if response.status_code >= 400:
+        print("Teams webhook failed")
+        print("Status code:", response.status_code)
+        print("Response body:", response.text[:1000])
+
+    response.raise_for_status()
 
 
 def main() -> None:
-    articles = fetch_news()
-    state, is_first_run = load_state()
+    state = load_state()
     seen_links = set(state.get("seen_links", []))
 
-    def article_link(article: dict) -> str:
-        return article.get("originallink") or article.get("link", "")
+    raw_items = fetch_naver_news()
+    articles = [normalize_article(item) for item in raw_items]
 
-    if is_first_run:
-        print(f"최초 실행입니다. {len(articles)}건을 state.json에 저장하고 알림은 보내지 않습니다.")
-        all_links = list(dict.fromkeys(article_link(a) for a in articles if article_link(a)))
-        save_state(all_links)
+    current_links = [
+        article["link"]
+        for article in articles
+        if article.get("link")
+    ]
+
+    new_articles = [
+        article
+        for article in articles
+        if article.get("link") and article["link"] not in seen_links
+    ]
+
+    # 최초 실행 시에는 기존 기사 폭탄 알림을 막기 위해 저장만 하고 종료합니다.
+    if not state.get("initialized"):
+        state["initialized"] = True
+        state["seen_links"] = list(dict.fromkeys(current_links))
+        save_state(state)
+        print("Initialized state. No Teams alerts sent on first run.")
         return
 
-    new_articles = [a for a in articles if article_link(a) and article_link(a) not in seen_links]
-
-    if not new_articles:
-        print("새 기사가 없습니다.")
-        return
-
-    # Naver returns newest first; send oldest-of-the-new-batch first so Teams shows them in order.
+    # 오래된 기사부터 순서대로 전송합니다.
     for article in reversed(new_articles):
         send_teams_message(article)
-        time.sleep(1)  # avoid hitting Teams webhook rate limits
 
-    updated_links = list(seen_links) + [article_link(a) for a in new_articles]
-    save_state(list(dict.fromkeys(updated_links)))
-
-    print(f"새 기사 {len(new_articles)}건을 Teams로 전송했습니다.")
+    if new_articles:
+        updated_links = list(dict.fromkeys(current_links + list(seen_links)))
+        state["seen_links"] = updated_links[:500]
+        save_state(state)
+        print(f"Sent {len(new_articles)} new article(s) to Teams.")
+    else:
+        print("No new articles.")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:  # noqa: BLE001
-        print(f"오류 발생: {exc}", file=sys.stderr)
-        sys.exit(1)
+    main()
