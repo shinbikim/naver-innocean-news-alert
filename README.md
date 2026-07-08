@@ -1,81 +1,86 @@
-# 네이버 뉴스 모니터링 (이노션)
+# 뉴스 이슈 레이더
 
-네이버 뉴스 검색 API로 "이노션" 키워드의 신규 기사를 주기적으로 확인하고,
-새로 발견된 기사만 Microsoft Teams 채널로 알려주는 GitHub Actions 기반 봇입니다.
+네이버 뉴스에서 지정 키워드의 신규 기사를 1시간마다 감지해 Microsoft Teams 채널로 자동 공유하는 뉴스 모니터링 자동화 도구입니다.
 
-## 동작 방식
+## 한줄 소개
 
-1. `monitor.py`가 네이버 뉴스 검색 API(`https://openapi.naver.com/v1/search/news.json`)를
-   `query=이노션`, `display=100`, `sort=date` 조건으로 호출합니다.
-2. 이전에 보낸 기사 링크 목록은 `state.json`에 저장되어 있습니다.
-   - `state.json`이 없는 **최초 실행**에서는 현재 검색 결과를 모두 `state.json`에 저장만 하고,
-     Teams 알림은 보내지 않습니다. (과거 기사가 한꺼번에 쏟아지는 것을 방지)
-   - 이후 실행부터는 `state.json`에 없는 **새 기사만** Teams로 전송하고, 전송한 링크를
-     `state.json`에 추가합니다.
-3. 새 기사가 없으면 아무 메시지도 보내지 않습니다.
-4. GitHub Actions 워크플로우가 실행될 때마다 `state.json`이 변경되면 자동으로 커밋됩니다.
+지정 키워드의 신규 뉴스 발생 여부를 주기적으로 확인하고, 새롭게 발견된 기사만 Teams 채널로 공유해주는 이슈 모니터링 봇입니다.
+
+## 기획 의도
+
+광고대행사 업무 특성상 회사뿐 아니라 다수의 클라이언트와 관련된 대내외 주요 이슈를 상시 파악하는 것이 중요합니다. 특히 부정 이슈나 위기성 보도가 발생했을 경우, 초기 인지 속도와 내부 공유 속도가 대응 품질을 좌우합니다.
+
+이에 따라 특정 키워드로 신규 뉴스를 주기적으로 확인하고, 새롭게 감지된 기사만 팀 협업 채널에 자동 공유되는 구조를 기획했습니다.
+
+현재는 `이노션`을 키워드로 설정했지만, 향후 클라이언트명, 브랜드명, 캠페인명, 주요 임원명 등 다양한 키워드로 확장해 PR, 위기관리, 클라이언트 이슈 모니터링 업무에 활용할 수 있습니다.
+
+## 주요 기능
+
+- 네이버 뉴스 검색 API 기반 키워드 모니터링
+- 1시간 단위 신규 기사 확인
+- 이전에 전송한 기사와 비교해 중복 알림 방지
+- 신규 기사 발생 시 Microsoft Teams 채널로 자동 공유
+- 신규 기사가 없을 경우 알림 미발송
+- GitHub Actions 기반 자동 실행으로 PC를 켜둘 필요 없음
+- 팀 단위 공유가 필요한 경우 Teams 채널에 팀원을 초대해 함께 확인 가능
+
+## 사용법
+
+이 자동화는 GitHub Actions를 통해 1시간마다 자동 실행됩니다.
+
+사용자는 별도로 프로그램을 실행할 필요가 없으며, 신규 기사가 발견되면 지정된 Microsoft Teams 채널에 알림이 발송됩니다.
+
+Teams 알림에는 아래 정보가 포함됩니다.
+
+- 기사 제목
+- 기사 요약
+- 발행일
+- 기사 링크
+
+신규 기사가 없을 경우에는 불필요한 알림을 보내지 않습니다.
+
+## 작동 방식
+
+1. GitHub Actions가 매시간 5분에 자동 실행됩니다.
+2. `monitor.py`가 네이버 뉴스 검색 API를 호출해 지정 키워드의 최신 뉴스를 조회합니다.
+3. 이전에 확인한 기사 링크 목록인 `state.json`과 비교합니다.
+4. 새롭게 발견된 기사만 Microsoft Teams 채널로 전송합니다.
+5. 전송한 기사 링크는 `state.json`에 저장해 중복 알림을 방지합니다.
+6. `state.json`이 변경되면 GitHub Actions가 자동으로 커밋합니다.
 
 ## 파일 구성
 
-- `monitor.py` : 뉴스 조회, 신규 기사 판별, Teams 전송 로직
-- `requirements.txt` : 의존성 목록 (표준 라이브러리만 사용하므로 실질적으로 비어 있음)
-- `.github/workflows/news-alert.yml` : 매시간 5분에 실행되는 GitHub Actions 워크플로우
-- `state.json` : 이전에 전송한 기사 링크 저장소 (최초 실행 시 자동 생성, 자동 커밋됨)
+- `monitor.py`  
+  뉴스 조회, 신규 기사 판별, Teams 전송 로직을 담당합니다.
 
-## 사전 준비: GitHub Secrets
+- `requirements.txt`  
+  Python 실행에 필요한 외부 라이브러리 목록입니다.
 
-저장소 `Settings > Secrets and variables > Actions`에 아래 3개가 이미 등록되어 있어야 합니다.
+- `.github/workflows/news-alert.yml`  
+  1시간마다 자동 실행되는 GitHub Actions 워크플로우입니다.
 
-| Secret 이름            | 설명                                  |
-| ---------------------- | ------------------------------------- |
-| `NAVER_CLIENT_ID`      | 네이버 오픈 API 애플리케이션 Client ID |
-| `NAVER_CLIENT_SECRET`  | 네이버 오픈 API 애플리케이션 Client Secret |
-| `TEAMS_WEBHOOK_URL`    | Teams 채널의 Incoming Webhook URL      |
+- `state.json`  
+  이전에 확인한 기사 링크를 저장해 중복 알림을 방지합니다.
+
+## GitHub Secrets
+
+API Key와 Teams Webhook URL은 코드에 직접 저장하지 않고 GitHub Secrets로 관리합니다.
+
+필요한 Secret은 아래 3개입니다.
+
+| Secret 이름 | 설명 |
+| --- | --- |
+| `NAVER_CLIENT_ID` | 네이버 오픈 API 애플리케이션 Client ID |
+| `NAVER_CLIENT_SECRET` | 네이버 오픈 API 애플리케이션 Client Secret |
+| `TEAMS_WEBHOOK_URL` | Microsoft Teams 채널 Webhook URL |
+
+실제 인증 정보는 GitHub Secrets에만 저장되며, Repository 코드에는 노출되지 않습니다.
 
 ## 실행 방법
 
 ### 자동 실행
 
-`.github/workflows/news-alert.yml`에 정의된 대로 **매시간 5분**(`cron: "5 * * * *"`)에
-자동으로 실행됩니다.
+GitHub Actions 워크플로우에 따라 매시간 5분에 자동 실행됩니다.
 
-### 수동 실행
-
-GitHub 저장소의 **Actions** 탭 > `Naver News Alert (이노션)` 워크플로우 > **Run workflow**
-버튼으로 언제든 수동 실행할 수 있습니다 (`workflow_dispatch`).
-
-### 로컬 실행 (테스트용)
-
-```bash
-pip install -r requirements.txt
-
-export NAVER_CLIENT_ID="..."
-export NAVER_CLIENT_SECRET="..."
-export TEAMS_WEBHOOK_URL="..."
-
-python monitor.py
-```
-
-로컬에서 실행하면 현재 디렉터리에 `state.json`이 생성/갱신됩니다.
-
-## Teams 메시지 내용
-
-새 기사가 발견되면 아래 항목을 포함한 메시지가 Teams 채널로 전송됩니다.
-
-- 제목
-- 요약
-- 발행일
-- 기사 링크
-
-## 커스터마이징
-
-- 검색 키워드를 바꾸려면 `monitor.py`의 `QUERY` 값을 수정하세요.
-- 실행 주기를 바꾸려면 `.github/workflows/news-alert.yml`의 `cron` 표현식을 수정하세요.
-- 저장하는 링크 개수 상한(`MAX_SEEN_LINKS`, 기본 1000개)은 `monitor.py`에서 조정할 수 있습니다.
-
-## 주의 사항
-
-- 이 워크플로우는 `contents: write` 권한으로 `state.json`을 저장소에 직접 커밋합니다.
-  브랜치 보호 규칙으로 인해 봇의 푸시가 막혀 있다면 예외를 허용해야 합니다.
-- 네이버 뉴스 검색 API는 최대 100건(`display=100`)까지만 반환하므로, 한 번의 실행 주기
-  동안 100건을 초과하는 새 기사가 쏟아지면 일부가 누락될 수 있습니다.
+```yaml
+cron: "5 * * * *"
