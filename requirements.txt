@@ -1,3 +1,1 @@
-# monitor.py only uses the Python standard library (urllib, json, html, re),
-# so there are no third-party dependencies to install. This file is kept for
-# future extensibility.
+requests==2.32.4
